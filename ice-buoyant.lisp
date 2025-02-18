@@ -428,7 +428,7 @@
     )
   )
 
-;; (defparameter *output-directory* (merge-pathnames "/nobackup/rmvn14/paper-2/visco-ice/"))
+;; (defparameter *output-directory* (merge-pathnames "/nobackup/rmvn14/paper-2/ice-buoyant/"))
 (defparameter *output-directory* (merge-pathnames "./output/"))
 (let ((threads (parse-integer (if (uiop:getenv "OMP_NUM_THREADS") (uiop:getenv "OMP_NUM_THREADS") "16"))))
   (setf lparallel:*kernel* (lparallel:make-kernel threads :name "custom-kernel"))
