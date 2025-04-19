@@ -12,12 +12,12 @@
 (defmethod cl-mpm::update-particle (mesh (mp cl-mpm/particle::particle-chalk-delayed) dt)
   (cl-mpm::update-particle-kirchoff mesh mp dt)
   ;(cl-mpm::update-domain-det mesh mp dt)
-  (cl-mpm::update-domain-polar-2d mesh mp dt)
+  ;(cl-mpm::update-domain-polar-2d mesh mp dt)
   ;(cl-mpm::co-domain-corner-2d mesh mp dt)
-  ;; (cl-mpm::update-domain-polar-2d mesh mp dt)
+  (cl-mpm::update-domain-polar-2d mesh mp dt)
   ;(cl-mpm::update-domain-midpoint mesh mp dt)
   ;(cl-mpm::update-domain-deformation mesh mp dt)
-  (cl-mpm::scale-domain-size mesh mp)
+  ;(cl-mpm::scale-domain-size mesh mp)
   )
 
 (defun setup (&key (refine 1) 
@@ -25,6 +25,7 @@
                    (height 800)
                    (cutback 0d0)
                    (aspect 1)
+                   (fbar nil)
                 )
   (let ((rank (cl-mpi:mpi-comm-rank)))
     (let* ((density 918d0)
@@ -59,8 +60,10 @@
              (gf 1000d0)
              ;(length-scale (* mesh-resolution 2d0))
              (length-scale 20d0)
+             (delay-time 1d3)
              (ductility (cl-mpm/damage::estimate-ductility-jirsek2004 gf length-scale init-stress E))
              (oversize (cl-mpm/damage::compute-oversize-factor (- 1d0 1d-3) ductility)))
+        (defparameter *delay-time* delay-time)
         (defparameter *removal-strain* (* 100d0 (/ init-stress 1)))
         (when (= rank 0)
           (format t "Mesh size ~F~%" mesh-resolution)
@@ -95,7 +98,7 @@
           :softening 0d0
           :ductility ductility
           :local-length length-scale
-          :delay-time 1d3
+          :delay-time delay-time
           :delay-exponent 2
           :enable-plasticity nil
           :enable-damage t
@@ -141,7 +144,7 @@
                (sqrt 1d4)
                (cl-mpm/setup:estimate-critical-damping *sim*)))
       (cl-mpm/setup::set-mass-filter *sim* density :proportion 1d-9)
-      (setf (cl-mpm::sim-enable-fbar *sim*) t)
+      (setf (cl-mpm::sim-enable-fbar *sim*) fbar)
       (setf (cl-mpm/damage::sim-enable-length-localisation *sim*) t)
       (setf (cl-mpm::sim-allow-mp-split *sim*) t)
       (setf (cl-mpm::sim-max-split-depth *sim*) 6)
@@ -154,23 +157,22 @@
             (* 0.5d0 (cl-mpm/setup:estimate-elastic-dt *sim*)))
       (setf (cl-mpm::sim-enable-damage *sim*) nil)
       (setf *run-sim* t)
-      (if t
-          (cl-mpm:add-bcs-force-list
-           *sim*
-           (cl-mpm/buoyancy::make-bc-buoyancy-clip
-            *sim*
-            datum
-            water-density
-            (lambda (pos datum) t)
-            :visc-damping 5d-1
-            ))
-          (cl-mpm:add-bcs-force-list
-           *sim*
-           (cl-mpm/buoyancy::make-bc-buoyancy-body
-            *sim*
-            datum
-            water-density
-            (lambda (pos) t))))
+      (defparameter *water-bc*
+        (if t
+             (cl-mpm/buoyancy::make-bc-buoyancy-clip
+              *sim*
+              datum
+              water-density
+              (lambda (pos datum) t)
+              :visc-damping 1d-1
+              )
+             (cl-mpm/buoyancy::make-bc-buoyancy-body
+              *sim*
+              datum
+              water-density
+              (lambda (pos) t))))
+      (cl-mpm:add-bcs-force-list *sim* *water-bc*)
+
       (let ((domain-half (* 0.5d0 (first domain-size)))
             (friction 0d0))
         (defparameter *floor-bc*
@@ -225,13 +227,19 @@
     ;(cl-mpm/output:save-vtk (merge-pathnames output-dir (format nil "sim_~2,'0d_~5,'0d.vtk" rank 0)) *sim*)
     ;(cl-mpm/output::save-vtk-nodes (merge-pathnames output-dir (format nil "sim_nodes_~2,'0d_~5,'0d.vtk" rank 0)) *sim*)
     (defparameter *damping-water* 0d0)
-    (let ((dt-scale 0.5d0))
+    (let ((dt-scale 0.5d0)
+          (visc-damping (cl-mpm/buoyancy::bc-viscous-damping *water-bc*))
+          (fbar (cl-mpm::sim-enable-fbar *sim*))
+          )
       (setf (cl-mpm:sim-mass-scale *sim*) 1d0)
       (setf (cl-mpm:sim-damping-factor *sim*)
             (* 1d-2
                (sqrt (cl-mpm:sim-mass-scale *sim*))
                (cl-mpm/setup:estimate-critical-damping *sim*)))
+      ;;Fbar kinda bops our convergence
       (setf (cl-mpm::sim-enable-fbar *sim*) nil)
+      ;;Extra viscous damping in the system is probably bad
+      (setf (cl-mpm/buoyancy::bc-viscous-damping *water-bc*) 0d0)
       (cl-mpm/dynamic-relaxation:converge-quasi-static
        *sim*
        :oobf-crit 1d-2
@@ -245,7 +253,8 @@
          (cl-mpm/output:save-vtk (merge-pathnames output-dir (format nil "sim_conv_~2,'0d_~5,'0d.vtk" rank (+ 1 i))) *sim*)))
       (setf (cl-mpm::sim-damping-algorithm *sim*) :VISCOUS)
       (setf (cl-mpm:sim-damping-factor *sim*) 0d0)
-      (setf (cl-mpm::sim-enable-fbar *sim*) nil)
+      (setf (cl-mpm::sim-enable-fbar *sim*) fbar)
+      (setf (cl-mpm/buoyancy::bc-viscous-damping *water-bc*) visc-damping)
       )
     (cl-mpm:iterate-over-mps 
       (cl-mpm:sim-mps *sim*) 
@@ -274,9 +283,10 @@
            (collapse-mass-scale 1d0)
            (criteria-energy 2d-2)
            (criteria-oobf 2d-2)
-           (hist-factor 2)
+           (hist-factor 1.5)
            (target-time 2d0)
            (time 0d0)
+           (crit-damp (cl-mpm/setup:estimate-critical-damping *sim*))
            )
       (when (= rank 0)
       (cl-mpm/output::save-simulation-parameters (merge-pathnames output-dir "settings.json")
@@ -286,6 +296,7 @@
                                            :criteria-oobf criteria-oobf
                                            :ocean-height *water-height*
                                            :criteria-hist hist-factor 
+                                           :delay-time *delay-time*
                                            )))
       (setf (cl-mpm::sim-mass-scale *sim*) accelerate-mass-scale
             target-time accelerate-target-time)
@@ -293,9 +304,7 @@
       (setf substeps (ceiling target-time (cl-mpm:sim-dt *sim*)))
       (format t "Substeps ~D~%" substeps)
       (let ((damage-est 0d0)
-            (mass-est 0d0)
-            
-            )
+            (mass-est 0d0))
         (loop for step from 0 below 1000
               while *run-sim*
               do
@@ -314,22 +323,23 @@
                                                  (cl-mpm/particle::mp-mass mp))
                                                #'+ (cl-mpm:sim-mps *sim*)
                                                :initial-value 0d0)))
-                 (when (= rank 0)
-                   (format t "Step ~D~%" step)
-                   (with-open-file (stream (merge-pathnames output-dir "timesteps.csv") :direction :output :if-exists :append)
-                     (format stream "~D,~f,~f,~f,~f,~f,~A,~f~%"
-                             step
-                             time
-                             ;(cl-mpm::sim-time *sim*)
-                             damage-est
-                             0d0 ;; *data-plastic*
-                             energy
-                             oobf
-                             sim-state
-                             mass-est
-                             ;; *data-mass*
-                             ))
-                   )
+                (let ((mp-count (cl-mpm/mpi:mpi-sum (float (length (cl-mpm:sim-mps *sim*)) 0d0))))
+                  (when (= rank 0)
+                    (format t "Step ~D~%" step)
+                    (format t "Total MPs ~D~%" (round mp-count))
+                    (with-open-file (stream (merge-pathnames output-dir "timesteps.csv") :direction :output :if-exists :append)
+                      (format stream "~D,~f,~f,~f,~f,~f,~A,~f~%"
+                              step
+                              time
+                              ;(cl-mpm::sim-time *sim*)
+                              damage-est
+                              0d0 ;; *data-plastic*
+                              energy
+                              oobf
+                              sim-state
+                              mass-est
+                              ;; *data-mass*
+                              ))))
                  ;; (setf work 0d0)
                  (cl-mpm/mpi::load-balance-algo *sim* :step-size 1d-2)
                  (setf energy 0d0
@@ -392,7 +402,8 @@
 
                  (cl-mpm/output:save-vtk (merge-pathnames output-dir (format nil "sim_~2,'0d_~5,'0d.vtk" rank step)) *sim*)
                  (cl-mpm/output::save-vtk-nodes (merge-pathnames output-dir (format nil "sim_nodes_~2,'0d_~5,'0d.vtk" rank step)) *sim*)
-
+                 (setf (cl-mpm:sim-damping-factor *sim*)
+                       (* 1d-6 (sqrt (cl-mpm:sim-mass-scale *sim*)) crit-damp))
                  (multiple-value-bind (dt-e substeps-e) (cl-mpm:calculate-adaptive-time *sim* target-time :dt-scale dt-scale)
                    (when (= rank 0)
                      (format t "CFL dt estimate: ~f~%" dt-e)
@@ -406,17 +417,18 @@
         (cutback 000d0)
         (height (if (uiop:getenv "HEIGHT") (parse-float:parse-float (uiop:getenv "HEIGHT")) 400d0))
         (refine (if (uiop:getenv "REFINE") (parse-float:parse-float (uiop:getenv "REFINE")) 0.5))
+        (fbar (if (uiop:getenv "FBAR") (string= (uiop:getenv "FBAR") "TRUE") nil))
         (ms (if (uiop:getenv "MS") (parse-float:parse-float (uiop:getenv "MS")) 1d4))
-        (output-dir (merge-pathnames (format nil "/nobackup/rmvn14/paper-2/ice-buoyant/output-NOREMOVE_~F_~F_~F/" height cutback refine)))
+        (output-dir (merge-pathnames (format nil "/nobackup/rmvn14/paper-2/ice-buoyant-trial/output-~F_~F_~F_~D_~A/" height cutback refine (cl-mpi:mpi-comm-size) fbar)))
         )
     (format t "Outputting to - ~A~%" output-dir)
     (setup :refine refine
            :height height
            :mps 2
            :cutback cutback
-           )
+           :fbar fbar)
     (when (typep *sim* 'cl-mpm/mpi::mpm-sim-mpi)
-   	  (let* ((height 1)
+      (let* ((height (if (> (cl-mpi:mpi-comm-size) 1) 2 1))
              (dsize (ceiling (cl-mpi:mpi-comm-size) height)))
         (setf (cl-mpm/mpi::mpm-sim-mpi-domain-count *sim*) (list dsize height 1)))
        (let ((mp (aref (cl-mpm:sim-mps *sim*) 0))) 
